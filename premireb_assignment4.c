@@ -5,9 +5,11 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <sys/wait.h> // for waitpid
+#include <signal.h> // FOr signal codes
 
 #define INPUT_LENGTH 2048
 #define MAX_ARGS 512
+#define MAX_BG_COMMANDS 50
 
 
 struct command_line
@@ -87,16 +89,83 @@ void cd(struct command_line* cl){
 
 }
 
-void cleanup_exit(){
+void print_status(int status){
 
-    // TODO terminate running processes
-    return;
+    printf("exit value %d", status);
+}
+
+
+void cleanup_exit(int bg_processes[]){
+
+    for(int i = 0; i < MAX_BG_COMMANDS; i++){
+        kill(bg_processes[i], SIGKILL) // No need to worry if the process is already complete and in zombie state
+
+    }
 
 }
 
-void print_status(int status){
 
-    printf("%d", status);
+void reap_finished_bg_processes(int bg_processes[]){
+
+    int childExitStatus;
+    int bg_pid;
+
+    // Check each process to see if they are complete and ready to be reaped
+    for(int i = 0; i < MAX_BG_COMMANDS; i++){
+        bg_pid = bg_processes[i];
+
+        if (bg_pid != NULL){ // a PID
+            bg_pid  = waitpid(bg_pid , &childExitStatus, WNOHANG);
+
+            if (bg_pid > 0){ // Process complete
+                printf("background pid %d is done: exit value %d", bg_pid, childExitStatus);
+                bg_processes[i] = NULL;
+
+            }
+        }
+    }
+
+}
+
+void insert_into_bg_process_array(int bg_processes[], int pid){
+
+    int bg_pid;
+
+    for(int i = 0; i < MAX_BG_COMMANDS; i++){
+        bg_pid = bg_processes[i];
+        if (bg_pid == NULL){
+            bg_processes[i] = pid;
+            break;
+        }
+    }
+
+}
+
+int redirect_stdin(char *source){
+
+    int sourceFD = open(source, O_RDONLY);
+    if (sourceFD == -1){
+        printf("cannot open %s for input", source);
+        fflush(stdout);
+        return -1;
+    }
+
+    dup2(sourceFD, stdin);
+    return 0;
+
+}
+
+int redirect_stdin(char *destination){
+
+    int destinationFD = open(destination, O_WRONLY);
+    if (destinationFD == -1){
+        printf("cannot open %s for output", destination);
+        fflush(stdout);
+        return -1;
+    }
+    dup2(destinationFD, stdout);
+    return 0;
+
 }
 
 int main(){
@@ -107,7 +176,8 @@ int main(){
     struct command_line *curr_command;
     int destinationFD;
     int sourceFD;
-    int background_processes[];
+    int bg_processes[MAX_BG_COMMANDS];
+    int bg_process_cnt;
 
     while(true)
     {
@@ -124,7 +194,7 @@ int main(){
             print_status(status);
 
         } else if (!strcmp(curr_command->command, "exit")){
-            cleanup_exit();
+            cleanup_exit(bg_processes);
             return EXIT_SUCCESS;
             
         } else {
@@ -134,50 +204,53 @@ int main(){
                 case -1:
                     perror("fork() failed!");
                     exit(1);
-                    break;
 
                 case 0: // Child
                     
-                    // Redirect streams if necessary
-                    if(curr_command->input_file){
-                        sourceFD = open(curr_command->input_file, O_RDONLY);
-                        if (sourceFD == -1){
-                            printf("cannot open %s for input", curr_command->input_file);
-                            fflush(stdout);
-                            status = 1;
-                            break;
-                        }
-                        dup2(sourceFD, stdin);
-                    }
-
-                    if(curr_command->output_file){
-                        destinationFD = open(curr_command->output_file, O_WRONLY);
-                        if (destinationFD == -1){
-                            printf("cannot open %s for output", curr_command->destination_file);
-                            fflush(stdout);
-                            status = 1; // Question for myself, what does the child return to if the whole program gets overwritten with exec?
-                            break;
-                        }
-                        dup2(destinationFD, stdout);
+                    // Redirect streams if necessary. Exit on failure.
+                    if(curr_command->is_bg && !curr_command->input_file && redirect_stdin("/dev/null") == -1){
+                        exit(2);
                     }
                     
-                    // Run command
+                    if(curr_command->input_file && redirect_stdin(curr_command->input_file) == -1){
+                        exit(2);
+                    }
+
+                    if(curr_command->is_bg && !curr_command->output_file && redirect_stdout("/dev/null") == -1){
+                        exit(2);
+                    }
+
+                    if(curr_command->output_file && redirect_stdout(curr_command->output_file) == -1){
+                        exit(2);
+                    }
+
+                    
+                    // Run command with exec
                     (curr_command->argv)[curr_command->argc+1] = NULL; // Add null terminator
                     execvp(curr_command->command, curr_command->argv);
                     perror("execvp"); // Only get here if exec fails
-                    exit(2);
-                    break;
+                    exit(3);
         
                 default: // Parent
                     
-                    spawnpid = waitpid(spawnpid, &childExitStatus, 0);
-                    if (WIFEXITED(childExitStatus)){
-                        status = 1; 
+                    if(!curr_command->is_bg){
+                        spawnpid = waitpid(spawnpid, &childExitStatus, 0);
+                        if (WIFEXITED(childExitStatus)){
+                            status = 1; 
+                        }
+
+                    } else {
+                        insert_into_bg_process_array(bg_processes, spawnpid);
+
                     }
                     break;
             }
         }
 
+        // Check for finished background commands
+        reap_finished_bg_processes(bg_processes);
+
     }
+
     return EXIT_SUCCESS;
 }
