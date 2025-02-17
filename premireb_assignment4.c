@@ -140,6 +140,7 @@ void reap_finished_bg_processes(int bg_processes[]){
                 printf("background pid %d is done: terminated by signal %d", bg_pid, WTERMSIG(childExitStatus));
                 fflush(stdout);
                 bg_processes[i] = -1;
+            }
         }
     }
 
