@@ -47,8 +47,10 @@ struct command_line *parse_input(){
     printf(": ");
     fflush(stdout);
 
-    fgets(input, INPUT_LENGTH, stdin);
-    
+    if (fgets(input, INPUT_LENGTH, stdin) == NULL){
+        return NULL;
+    }
+
     // Parse the command or comment separately
     char *token = strtok(input, " \n");
 
@@ -200,13 +202,13 @@ void handle_SIGTSTP(int signo){ //Ctrl-Z
 
     // Change background ignore to opposite state
     if (!ignore_bg){
-        char* message = "Entering foreground-only mode (& is now ignored)\n";
-        write(STDOUT_FILENO, message, 49);
+        char* message = "\nEntering foreground-only mode (& is now ignored)\n";
+        write(STDOUT_FILENO, message, 50);
         ignore_bg = true;
 
     } else {
-        char* message = "Exiting foreground-only mode\n";
-        write(STDOUT_FILENO, message, 29);
+        char* message = "\nExiting foreground-only mode\n";
+        write(STDOUT_FILENO, message, 30);
         ignore_bg = false;
     }
 
@@ -233,7 +235,7 @@ int main(){
     
     // Handle SIGTSTP
     SIGTSTP_action.sa_handler = handle_SIGTSTP; 
-    SIGTSTP_action.sa_flags = SA_RESTART;
+    //SIGTSTP_action.sa_flags = SA_RESTART;
     sigfillset(&SIGTSTP_action.sa_mask); // Block all signals while running handler
     sigaction(SIGTSTP, &SIGTSTP_action, NULL);
 
@@ -255,7 +257,7 @@ int main(){
         }
 
         // Handle built-in command first in parent
-        if (curr_command->ignore){
+        if (curr_command == NULL || curr_command->ignore){ // Error in read or blank line
             // Do nothing
 
         } else if (!strcmp(curr_command->command, "cd")){
