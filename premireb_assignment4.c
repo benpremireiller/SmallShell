@@ -54,7 +54,7 @@ struct command_line *parse_input(){
     // Parse the command or comment separately
     char *token = strtok(input, " \n");
 
-    if(token == NULL || !strcmp(token, "#")){ // blank or comment
+    if(token == NULL || !strncmp(token, "#", 1)){ // blank or comment
         curr_command->ignore = true;
         return curr_command;
     }
@@ -90,8 +90,8 @@ struct command_line *parse_input(){
 void cd(struct command_line* cl){
 
     // Uses the second argument as the directory to change to
-    if (cl->argc == 0){
-        chdir("/home");
+    if (cl->argc == 1){
+        chdir(getenv("HOME"));
     } else {
         chdir(cl->argv[1]);
     }
