@@ -11,7 +11,7 @@
 
 #define INPUT_LENGTH 2048
 #define MAX_ARGS 512
-#define MAX_BG_COMMANDS 50
+#define MAX_BG_COMMANDS 5
 
 bool ignore_bg = false;
 
@@ -29,7 +29,7 @@ struct command_line
 
 void print_command_line_struct(struct command_line* cl){
 
-    printf("Command: %s\nInput File: %s\nOutput File: %s\nBackground: %d\n", cl->command, cl->input_file, cl->output_file, cl->is_bg);
+    printf("Argc: %d\nCommand: %s\nInput File: %s\nOutput File: %s\nBackground: %d\n", cl->argc, cl->command, cl->input_file, cl->output_file, cl->is_bg);
     fflush(stdout);
     for(int i = 0; i < cl->argc; i++){
         printf("Arg %i: %s\n", i, (cl->argv)[i]);
@@ -42,6 +42,7 @@ struct command_line *parse_input(){
 
     char input[INPUT_LENGTH];
     struct command_line *curr_command = (struct command_line *) calloc(1,sizeof(struct command_line));
+
     // Get input
     printf(": ");
     fflush(stdout);
@@ -108,7 +109,7 @@ void cleanup_exit(int bg_processes[]){
     for(int i = 0; i < MAX_BG_COMMANDS; i++){
         bg_pid = bg_processes[i];
 
-        if(bg_pid != -1){ 
+        if(bg_pid != 0){ 
             kill(bg_processes[i], SIGKILL); // No need to worry if the process is already complete and in zombie state
         }
 
@@ -125,27 +126,28 @@ void reap_finished_bg_processes(int bg_processes[]){
     for(int i = 0; i < MAX_BG_COMMANDS; i++){
         bg_pid = bg_processes[i];
 
-        if (bg_pid != -1){ // a PID
+        if (bg_pid != 0){ // a process
             bg_pid = waitpid(bg_pid , &childExitStatus, WNOHANG);
 
             if (bg_pid == 0){ // pid exists but state has not changed
                 continue;
             }
             
+            // Check for termination reason and print info
             if (WIFEXITED(childExitStatus)){
                 printf("background pid %d is done: exit value %d\n", bg_pid, WEXITSTATUS(childExitStatus));
                 fflush(stdout);
-                bg_processes[i] = -1;
+                bg_processes[i] = 0;
 
             } else if (WIFSIGNALED(childExitStatus)){
-                printf("background pid %d is done: terminated by signal %d", bg_pid, WTERMSIG(childExitStatus));
+                printf("background pid %d is done: terminated by signal %d\n", bg_pid, WTERMSIG(childExitStatus));
                 fflush(stdout);
-                bg_processes[i] = -1;
+                bg_processes[i] = 0;
 
             } else {
-                printf("background pid %d is done: stopped by unknown ", bg_pid);
+                printf("background pid %d is done: stopped\n", bg_pid); // Shouldn't happen in this program
                 fflush(stdout);
-                bg_processes[i] = -1;
+                bg_processes[i] = 0;
             }
         }
     }
@@ -158,7 +160,7 @@ void insert_into_bg_process_array(int bg_processes[], int pid){
 
     for(int i = 0; i < MAX_BG_COMMANDS; i++){
         bg_pid = bg_processes[i];
-        if (bg_pid == -1){
+        if (bg_pid == 0){
             bg_processes[i] = pid;
             break;
         }
@@ -206,14 +208,14 @@ void handle_SIGTSTP(int signo){ //Ctrl-Z
         char* message = "Exiting foreground-only mode\n";
         write(STDOUT_FILENO, message, 29);
         ignore_bg = false;
-
     }
 
-    return;
 }
 
 void handle_SIGINT(int signo){ //Ctrl-C
-    exit(signo); // This right??
+
+    raise(SIGKILL);
+
 }
 
 
@@ -225,23 +227,21 @@ int main(){
     struct command_line *curr_command;
     int destinationFD;
     int sourceFD;
-    int bg_processes[MAX_BG_COMMANDS] = {-1}; // Change this type to pid_t?
-    int bg_process_cnt;
+    int bg_processes[MAX_BG_COMMANDS] = {0}; // Change this type to pid_t?
     sigset_t blockSet, prevMask;
-
-    // Set up signal handlers
-    struct sigaction SIGTSTP_action = {0}, ignore_action = {0};
+    struct sigaction SIGTSTP_action = {0}, ignore_action = {0};  // Set up signal handlers
     
     // Handle SIGTSTP
     SIGTSTP_action.sa_handler = handle_SIGTSTP; 
+    SIGTSTP_action.sa_flags = SA_RESTART;
+    sigfillset(&SIGTSTP_action.sa_mask); // Block all signals while running handler
     sigaction(SIGTSTP, &SIGTSTP_action, NULL);
-    sigfillset(&SIGTSTP_action.sa_mask); // Block all signals while running
 
     // Ignore SIGINT
     ignore_action.sa_handler = SIG_IGN;
     sigaction(SIGINT, &ignore_action, NULL);
 
-    // Create signal set for SIGTSTP
+    // Create signal set for SIGTSTP mask
     sigemptyset(&blockSet);
     sigaddset(&blockSet, SIGTSTP);
 
@@ -256,7 +256,7 @@ int main(){
 
         // Handle built-in command first in parent
         if (curr_command->ignore){
-            continue;
+            // Do nothing
 
         } else if (!strcmp(curr_command->command, "cd")){
             cd(curr_command);
@@ -279,11 +279,11 @@ int main(){
                 case 0: // Child
                     
                     // Ignore SIGTSTP for all children. 
-                    sigaction(SIGTSTP, &ignore_action, NULL);
+                    sigaction(SIGTSTP, &ignore_action, NULL); // Reuse parent sigaction struct
 
                     // Handle SIGINT
                     struct sigaction SIGINT_action = {0};
-                    SIGINT_action.handler = handle_SIGINT;
+                    SIGINT_action.sa_handler = handle_SIGINT;
                     sigaction(SIGINT, &SIGINT_action, NULL);
 
                     if (curr_command->is_bg && !ignore_bg){
@@ -291,33 +291,31 @@ int main(){
                         // Background processes ignore SIGINT
                         sigaction(SIGINT, &ignore_action, NULL);
 
-                        printf("background pid is %d\n", getpid());
-                        fflush(stdout);
-
                         // Redirect bg process streams to /dev/null if there is no value specified 
-                        if(!curr_command->input_file && redirect_stdin("/dev/null") == -1){
-                            exit(2);
+                        if(!curr_command->input_file){
+                            redirect_stdin("/dev/null"); // Should not fail
                         }
 
-                        if(!curr_command->output_file && redirect_stdout("/dev/null") == -1){
-                            exit(2);
+                        if(!curr_command->output_file){
+                            redirect_stdout("/dev/null");
                         }
                     }
 
                     // Redirect streams if necessary
                     if(curr_command->input_file && redirect_stdin(curr_command->input_file) == -1){
-                        exit(2);
+                        exit(1);
+                        // This needs to 
                     }
 
                     if(curr_command->output_file && redirect_stdout(curr_command->output_file) == -1){
-                        exit(2);
+                        exit(1);
                     }
 
                     // Run command with exec. Search PATH and execute it in child process.
                     (curr_command->argv)[(curr_command->argc)+1] = NULL; // Add null terminator to args
                     execvp(curr_command->command, curr_command->argv);
                     perror("execvp");
-                    exit(3);
+                    exit(2);
         
                 default: // Parent
                     
@@ -325,18 +323,25 @@ int main(){
                         spawnpid = waitpid(spawnpid, &childExitStatus, 0);
 
                         if (WIFEXITED(childExitStatus)){
-                            status = 0; // TODO, this is returning 0 even if I send a bogus command to execvp. Is it because I am exiting with exit(2, 3). Maybe remove these?
+
+                            if (WEXITSTATUS(childExitStatus) == 1 || WEXITSTATUS(childExitStatus) == 2){
+                                status = 1;
+                            } else {
+                                status = 0;
+                            }
 
                         } else if (WIFSIGNALED(childExitStatus)){
-                            printf("terminated by signal %d", WTERMSIG(childExitStatus));
+                            printf("terminated by signal %d\n", WTERMSIG(childExitStatus));
                             fflush(stdout);
 
-                        } else {
+                        } else { // Other stop method (not handled here)
                             status = 1;
 
                         }
 
                     } else {
+                        printf("background pid is %d\n", spawnpid);
+                        fflush(stdout);
                         insert_into_bg_process_array(bg_processes, spawnpid);
 
                     }
