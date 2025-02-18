@@ -13,10 +13,7 @@
 #define MAX_ARGS 512
 #define MAX_BG_COMMANDS 50
 
-bool delay_SIGTSTP = false;
-bool pending_SIGSTP = false;
 bool ignore_bg = false;
-
 
 
 struct command_line
@@ -130,14 +127,23 @@ void reap_finished_bg_processes(int bg_processes[]){
 
         if (bg_pid != -1){ // a PID
             bg_pid = waitpid(bg_pid , &childExitStatus, WNOHANG);
+
+            if (bg_pid == 0){ // pid exists but state has not changed
+                continue;
+            }
             
             if (WIFEXITED(childExitStatus)){
-                printf("background pid %d is done: exit value %d\n", bg_pid, childExitStatus);
+                printf("background pid %d is done: exit value %d\n", bg_pid, WEXITSTATUS(childExitStatus));
                 fflush(stdout);
                 bg_processes[i] = -1;
 
             } else if (WIFSIGNALED(childExitStatus)){
                 printf("background pid %d is done: terminated by signal %d", bg_pid, WTERMSIG(childExitStatus));
+                fflush(stdout);
+                bg_processes[i] = -1;
+
+            } else {
+                printf("background pid %d is done: stopped by unknown ", bg_pid);
                 fflush(stdout);
                 bg_processes[i] = -1;
             }
@@ -189,11 +195,8 @@ int redirect_stdout(char *destination){
 
 void handle_SIGTSTP(int signo){ //Ctrl-Z
     
-    if (delay_SIGTSTP){
-        pending_SIGSTP = true;
-        return;
-    }
 
+    // Change background ignore to opposite state
     if (!ignore_bg){
         char* message = "Entering foreground-only mode (& is now ignored)\n";
         write(STDOUT_FILENO, message, 49);
@@ -206,7 +209,6 @@ void handle_SIGTSTP(int signo){ //Ctrl-Z
 
     }
 
-    pending_SIGSTP = false;
     return;
 }
 
@@ -225,6 +227,7 @@ int main(){
     int sourceFD;
     int bg_processes[MAX_BG_COMMANDS] = {-1}; // Change this type to pid_t?
     int bg_process_cnt;
+    sigset_t blockSet, prevMask;
 
     // Set up signal handlers
     struct sigaction SIGTSTP_action = {0}, ignore_action = {0};
@@ -238,17 +241,20 @@ int main(){
     ignore_action.sa_handler = SIG_IGN;
     sigaction(SIGINT, &ignore_action, NULL);
 
+    // Create signal set for SIGTSTP
+    sigemptyset(&blockSet);
+    sigaddset(&blockSet, SIGTSTP);
+
     while(true)
     {
         
-        // Delay SIGTSTP signal until after execution of command, may need to move these around fgets() in parse_input()
-        delay_SIGTSTP = false;
+        // Get command then delay SIGTSTP signal until after execution of command
         curr_command = parse_input();
-        delay_SIGTSTP = true;
+        if (sigprocmask(SIG_BLOCK, &blockSet, &prevMask) == -1){
+            return EXIT_FAILURE;
+        }
 
-        //print_command_line_struct(curr_command);
-
-        // Handle built-in command first
+        // Handle built-in command first in parent
         if (curr_command->ignore){
             continue;
 
@@ -319,7 +325,7 @@ int main(){
                         spawnpid = waitpid(spawnpid, &childExitStatus, 0);
 
                         if (WIFEXITED(childExitStatus)){
-                            status = 0; // TODO, this is returning 0 even if I send a bogus command to execvp.
+                            status = 0; // TODO, this is returning 0 even if I send a bogus command to execvp. Is it because I am exiting with exit(2, 3). Maybe remove these?
 
                         } else if (WIFSIGNALED(childExitStatus)){
                             printf("terminated by signal %d", WTERMSIG(childExitStatus));
@@ -338,9 +344,9 @@ int main(){
             }
         }
 
-        // Send SIGTSTP to current process if pending
-        if (pending_SIGSTP){
-            kill(getpid(), SIGTSTP);
+        // Unblock signals sent during process execution
+        if (sigprocmask(SIG_SETMASK, &prevMask, NULL) == -1){
+            return EXIT_FAILURE;
         }
 
         // Check for finished background commands
